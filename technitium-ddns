@@ -649,18 +649,6 @@ if "${NEEDS_WAN}"; then
     if [ -z "${WAN}" ]; then
         if [ -z "${WAN_IFACE}" ]; then
             if "${DRY_RUN}"; then
-                WAN="YOUR.WAN.IP"
-            else
-                log_err "WAN_IFACE not set in ${CONF_FILE} (or override with: sudo WAN=1.2.3.4 technitium-ddns)"
-                exit 1
-            fi
-        else
-            WAN=$(ip -4 addr show "${WAN_IFACE}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
-        fi
-    fi
-    if [ -z "${WAN}" ]; then
-        if [ -z "${WAN_IFACE}" ]; then
-            if "${DRY_RUN}"; then
                 log "WARNING: WAN_IFACE not set in ${CONF_FILE} — running example.com as demo with WAN=1.2.3.4 and LAN=10.0.0.1"
                 WAN="1.2.3.4"
             else
