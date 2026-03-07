@@ -165,6 +165,11 @@ wildip IN APP                 ; no recordData
 `true`/`false` shorthand is only valid for `SplitHorizon.SimpleAddress`.
 All other apps accept JSON or empty.
 
+## Stress Test Zone
+
+The stress-test zone is located at [tests/stress-test.test/main.zone](tests/stress-test.test/main.zone).  
+If you encounter a valid BIND9 record that the parser does not handle correctly, please open a PR to add it to the zone.
+
 ## Configuration
 
 `/etc/technitium-ddns/technitium-ddns.conf` must be `root:root 640`.
