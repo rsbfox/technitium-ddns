@@ -28,11 +28,6 @@ clients get WAN addresses automatically.
 ## Requirements
 
 - [Technitium DNS Server](https://technitium.com/dns/)
-- `grepcidr` — `apt install grepcidr`
-- `jq` — `apt install jq`
-- `envsubst` — `apt install gettext-base`
-- `curl` — `apt install curl`
-- `perl` — `apt install perl`
 
 ## Optional
 
@@ -42,10 +37,7 @@ records. Returns `${LAN}` to private clients and `${WAN}` to public clients.
 **WildIp** — install from the Technitium app store. Resolves the IP encoded
 in the label itself, e.g. `1.2.3.4.wildip.example.com → A 1.2.3.4`.
 
-**FreeDNS** ([freedns.afraid.org](https://freedns.afraid.org)) — free shared or
-delegated DNS. You can get full NS delegation for your own subdomain with a
-glue record pointing to your server, making Technitium authoritative for your
-zone. Set `FREEDNS_KEYS` in the config to trigger updates on each run.
+**FreeDNS** ([freedns.afraid.org](https://freedns.afraid.org)) — free dynamic DNS. Register subdomains on any of thousands of community-shared domains. They also support pointing an NS record at your own server, making Technitium authoritative for that subdomain — enabling wildcard records, split-horizon DNS, and automated DNS-01 Let's Encrypt challenges. Set FREEDNS_KEYS in the config to push IP updates on each run.
 
 #UNTESTED **wan-routable** — a networkd-dispatcher script that triggers `technitium-ddns`
 automatically when the WAN interface obtains a new routable IP. Requires
@@ -82,7 +74,7 @@ Install config and example zone:
 ```
 sudo mkdir -p /etc/technitium-ddns/example.com
 sudo cp technitium-ddns.conf /etc/technitium-ddns/
-sudo cp main.zone /etc/technitium-ddns/example.com/
+sudo cp example.com/main.zone /etc/technitium-ddns/example.com/
 sudo chown root:root /etc/technitium-ddns/technitium-ddns.conf
 sudo chmod 640 /etc/technitium-ddns/technitium-ddns.conf
 sudo chown root:root /etc/technitium-ddns/example.com/main.zone
@@ -179,12 +171,16 @@ All other apps accept JSON or empty.
 
 | Variable | Required | Description |
 |---|---|---|
-| `WAN_IFACE` | yes | Network interface for WAN IP detection |
-| `LAN_IFACE` | yes | Network interface for LAN IP detection |
+| `WAN_IFACE` | if needed | Network interface for WAN IP detection |
+| `LAN_IFACE` | if needed | Network interface for LAN IP detection |
 | `TECH_TOKEN` | yes* | Technitium API token (*not needed for `--dry-run`) |
 | `TECH_API_BASE` | no | API base URL (default: `http://localhost:5380/api`) |
 | `FREEDNS_KEYS` | no | Comma-separated afraid.org update keys |
 
+`WAN_IFACE` and `LAN_IFACE` are only required if your zone files use `${WAN}`,
+`${LAN}`, or `SplitHorizon.SimpleAddress` APP records. Zones with only static
+records need neither.
+
 ## Status
 
-Tested on Ubuntu 24.04 with Technitium DNS Server. Vibe coded. Use at your own risk.
+Tested on Ubuntu 24.04 with Technitium DNS Server. Vibe coded with. Use at your own risk.
