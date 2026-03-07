@@ -2,7 +2,7 @@
 # /usr/local/bin/technitium-ddns
 #
 # Syncs BIND9-format zone files to a Technitium DNS server via its REST API.
-# Zone files live in zones/ subdirectories under the config root, one directory
+# Zone files are located in the zones/ subdirectory under the config root, one directory
 # per zone named after the zone FQDN, each containing a main.zone file.
 #
 # /etc/technitium-ddns/
@@ -56,7 +56,7 @@
 # DRY RUN (specific zone):
 #   sudo technitium-ddns --dry-run your.domain
 #
-# RUN TESTS (all test zones — zones must use .test TLD per RFC 6761):
+# RUN TESTS (all test zones must use .test TLD per RFC 6761):
 #   sudo technitium-ddns --run-tests
 #
 # RUN TESTS (specific test zone):
