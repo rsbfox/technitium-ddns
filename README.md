@@ -183,4 +183,4 @@ records need neither.
 
 ## Status
 
-Tested on Ubuntu 24.04 with Technitium DNS Server. Vibe coded with. Use at your own risk.
+Tested on Ubuntu 24.04 VM with Technitium DNS Server. wan-routable needs tested. Vibe coded. Use at your own risk.
