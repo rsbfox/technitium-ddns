@@ -1,0 +1,154 @@
+; /etc/technitium-ddns/example.com/main.zone
+;
+; Example zone for technitium-ddns — run with:
+;   sudo technitium-ddns example.com
+;
+; This zone always runs in dry run mode. Copy this directory to
+; your own domain and edit to get started.
+;
+; ${WAN} and ${LAN} placeholders are substituted at runtime from your
+; network interfaces. All record types shown here are supported.
+
+$TTL 1h
+
+; ============================================================
+; SOA — Start of Authority
+; Use "auto" for serial to enable Technitium's date scheme
+; ============================================================
+
+@   IN SOA  ns1 hostmaster (
+        auto        ; serial  — auto = useSerialDateScheme
+        3600        ; refresh
+        900         ; retry
+        604800      ; expire
+        300 )       ; minimum TTL
+
+; ============================================================
+; NS — Name Servers
+; ============================================================
+
+@       IN NS   ns1
+@       IN NS   ns2
+
+ns1     IN A    ${WAN}
+ns1     IN AAAA 2001:db8::1
+
+ns2     IN A    203.0.113.2
+ns2     IN AAAA 2001:db8::2
+
+; ============================================================
+; MX — Mail
+; ============================================================
+
+@       IN MX   10 mail
+@       IN MX   20 mail2
+
+mail    IN A    ${WAN}
+mail    IN AAAA 2001:db8::10
+mail2   IN A    203.0.113.20
+
+; ============================================================
+; A / AAAA — Hosts
+; ============================================================
+
+@       IN A    ${WAN}
+@       IN AAAA 2001:db8::1
+
+www     IN CNAME    @
+ftp     IN CNAME    @
+
+vpn     IN A    ${WAN}
+dev     IN A    ${WAN}
+
+; Round-robin load balancing
+lb      IN A    192.0.2.10
+        IN A    192.0.2.11
+        IN A    192.0.2.12
+
+; ============================================================
+; TXT — SPF, DKIM, DMARC, MTA-STS
+; ============================================================
+
+@       IN TXT  "v=spf1 ip4:${WAN} mx ~all"
+
+; DKIM — multi-string for long keys
+dkim._domainkey IN TXT (
+    "v=DKIM1; k=rsa; "
+    "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2a2rwplBQLF"
+    "HPZe5ThibnMGaOjDkMYBQGQnMFBGDfGMDyxlEkZJFGDfGMDyxlEkZJF" )
+
+_dmarc  IN TXT  ( "v=DMARC1; p=reject; "
+                  "rua=mailto:dmarc@example.com; "
+                  "ruf=mailto:dmarc@example.com" )
+
+_mta-sts    IN TXT  "v=STSv1; id=20260101"
+mta-sts     IN A    ${WAN}
+
+; ============================================================
+; CAA — Certificate Authority Authorization
+; Restricts which CAs may issue TLS certificates for this domain
+; flags: 0 = non-critical, 128 = critical
+; tags:  issue = allow CA, issuewild = allow wildcard, iodef = report URL
+; ============================================================
+
+@   IN CAA  0 issue "letsencrypt.org"
+@   IN CAA  0 issuewild "letsencrypt.org"
+@   IN CAA  0 iodef "mailto:ssl@example.com"
+
+; ============================================================
+; SRV — Service records
+; ============================================================
+
+; SIP over TCP and UDP
+_sip._tcp   IN SRV  10 60 5060 sip1
+_sip._tcp   IN SRV  20 60 5060 sip2
+_sip._udp   IN SRV  10 60 5060 sip1
+
+sip1    IN A    192.0.2.30
+sip2    IN A    192.0.2.31
+
+; LDAP
+_ldap._tcp  IN SRV  0 100 389 ldap
+ldap        IN A    192.0.2.32
+
+; ============================================================
+; APP — Technitium DNS App records
+; $APP sets the app for all following APP records
+; Multiple $APP directives can appear in one zone file
+; ============================================================
+
+$APP SplitHorizon.SimpleAddress Split Horizon ; accepts boolean
+
+@           IN APP  true  ; returns ${LAN} to private and  ${WAN}  to public
+home        IN APP  false ; returns ${LAN} to private and NXDOMAIN to public
+jellyfin    IN APP  false
+plex        IN APP  false
+cockpit     IN APP  false
+portainer   IN APP  false
+
+staging     IN APP  {"private":["10.0.0.50"],"public":["203.0.113.100"]} ; json recordData passed directly
+
+$APP WildIp.App Wild IP ; WildIp resolves the IP encoded in the label itself
+                        ; e.g. 1.2.3.4.wildip.example.com → A 1.2.3.4
+wildip      IN APP ; no recordData (app handles resolution itself)
+
+; ============================================================
+; $ORIGIN — subzone delegation
+; Relative names (no trailing dot) are appended to current origin.
+; $ORIGIN dev → dev.example.com (relative to current origin)
+; $ORIGIN dev.example.com. → dev.example.com (absolute, trailing dot)
+; Placed last so no reset is needed.
+; ============================================================
+
+$ORIGIN dev
+
+@       IN MX   10 mail
+@       IN TXT  "v=spf1 ip4:${WAN} ~all"
+
+api     IN A    192.0.2.200
+db      IN AAAA 2001:db8::200
+mail    IN A    192.0.2.201
+
+lb      IN A    192.0.2.210
+        IN A    192.0.2.211
+        IN A    192.0.2.212
