@@ -1,0 +1,161 @@
+; /etc/technitium-ddns/stress-test.test/main.zone
+
+$ORIGIN stress-test.test.
+$TTL 3600
+
+; ============================================================
+; SOA - multiline with time-unit suffixes and inline comments
+; ============================================================
+@   IN  SOA ns1.stress-test.test. hostmaster.stress-test.test. (
+        2026030801  ; serial
+        3H          ; refresh
+        15M         ; retry
+        1W          ; expire
+        1D )        ; minimum
+
+; ============================================================
+; NS records - inherited @ name (blank indent)
+; ============================================================
+        IN  NS  ns1
+        IN  NS  ns2
+
+; ============================================================
+; A records - explicit TTL overrides, round-robin (inherited name)
+; ============================================================
+ns1     300     IN  A   192.0.2.1
+ns2     300     IN  A   192.0.2.2
+
+; Round-robin A records using inherited name
+cluster IN  A   192.0.2.10
+        IN  A   192.0.2.11
+        IN  A   192.0.2.12
+
+; ============================================================
+; AAAA records
+; ============================================================
+ns1     IN  AAAA    2001:db8::1
+ns2     IN  AAAA    2001:db8::2
+cluster IN  AAAA    2001:db8::10
+        IN  AAAA    2001:db8::11
+
+; ============================================================
+; MX records - multiple priorities
+; ============================================================
+@   IN  MX  10  mail
+@   IN  MX  20  mail2
+@   IN  MX  30  mail.backup.stress-test.test.
+
+; ============================================================
+; TXT records - single string, multi-string, multiline parens
+; ============================================================
+@   IN  TXT "v=spf1 mx a ip4:192.0.2.0/24 -all"
+
+; Multi-string TXT (e.g. long DKIM key split across strings)
+dkim._domainkey IN TXT (
+    "v=DKIM1; k=rsa; "
+    "p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2a2rwplBQLzHPZe5T"
+    "hibnMGaOjDkMYBQGQnMFBGDfGMDyxlEkZJFGDfGMDyxlEkZJFGDfGMDyxlEkZJ" )
+
+; DMARC - multi-string with semicolons inside quotes
+_dmarc  IN  TXT (
+    "v=DMARC1; p=reject; "
+    "rua=mailto:dmarc@stress-test.test; "
+    "ruf=mailto:dmarc@stress-test.test" )
+
+; mta-sts policy
+_mta-sts    IN  TXT "v=STSv1; id=20260301"
+
+; ============================================================
+; CNAME records - relative and absolute targets
+; ============================================================
+www     IN  CNAME   cluster
+ftp     IN  CNAME   ns1.stress-test.test.
+mail    IN  A       192.0.2.20
+mail2   IN  A       192.0.2.21
+
+; ============================================================
+; SRV records - multiple entries same service
+; ============================================================
+_sip._tcp   IN  SRV 10 60 5060 sip1
+_sip._tcp   IN  SRV 20 60 5060 sip2
+_sip._udp   IN  SRV 10 60 5060 sip1
+_ldap._tcp  IN  SRV 0  100 389 ldap
+
+sip1    IN  A   192.0.2.30
+sip2    IN  A   192.0.2.31
+ldap    IN  A   192.0.2.32
+
+; ============================================================
+; PTR-style names (non-reverse zone, just testing label parsing)
+; ============================================================
+host-1      IN  A   192.0.2.40
+host-2      IN  A   192.0.2.41
+123start    IN  A   192.0.2.42
+
+; ============================================================
+; Wildcard
+; ============================================================
+*.wildcard  IN  A   192.0.2.100
+
+; ============================================================
+; Escaped label - \DDD decimal notation
+; \065 = decimal 65 = A  so \065host = Ahost
+; ============================================================
+\065host    IN  A   192.0.2.50
+
+; ============================================================
+; Long TTL test (within SOA expire of 1W = 604800s)
+; ============================================================
+long-ttl    604799  IN  A   192.0.2.60
+
+; ============================================================
+; APP record tests
+; ============================================================
+
+; ERROR: APP record before any $APP directive
+early   IN APP  true
+
+$APP SplitHorizon.SimpleAddress Split Horizon
+
+; OK: true/false shorthand
+@       IN APP  true
+home    IN APP  false
+
+; OK: custom JSON passed to SplitHorizon.SimpleAddress
+custom  IN APP  {"private":["10.0.0.5"],"public":["1.2.3.4"]}
+
+; ERROR: invalid value for SplitHorizon.SimpleAddress (not true/false/json/empty)
+bad     IN APP  banana
+
+$APP WildIp.App Wild IP
+
+; OK: empty value
+wildip  IN APP
+
+; OK: raw JSON
+wildjson IN APP {"someKey":"someVal"}
+
+; ERROR: true/false not valid for non-SplitHorizon app
+badwild IN APP  true
+
+; ERROR: non-JSON string not valid for non-SplitHorizon app
+badwild2 IN APP notjson
+
+$APP
+; ERROR: $APP with missing args (no classPath or name)
+
+; ============================================================
+; $ORIGIN shift into subdomain
+; ============================================================
+$ORIGIN dev.stress-test.test.
+
+api         IN  A       192.0.2.200
+@           IN  MX  10  mail
+mail        IN  A       192.0.2.201
+db          IN  AAAA    2001:db8::200
+
+; Inherited name round-robin in shifted origin
+lb          IN  A   192.0.2.210
+            IN  A   192.0.2.211
+            IN  A   192.0.2.212
+
