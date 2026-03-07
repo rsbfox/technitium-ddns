@@ -48,6 +48,12 @@
 # DRY RUN (specific zone):
 #   sudo technitium-ddns --dry-run your.domain
 #
+# RUN TESTS (all test zones — zones must use .test TLD per RFC 6761):
+#   sudo technitium-ddns --run-tests
+#
+# RUN TESTS (specific test zone):
+#   sudo technitium-ddns --run-tests stress-test.test
+#
 # OVERRIDE WAN OR LAN:
 #   sudo WAN=1.2.3.4 LAN=192.168.1.1 technitium-ddns
 #
@@ -594,14 +600,25 @@ source "${CONF_FILE}"
 # Determine which zones to process
 ZONES_DIR="${DDNS_DIR%/}"
 shopt -s nullglob
-# Parse arguments — --dry-run and optional zone name (order independent)
+# Parse arguments — --dry-run, --run-tests, and optional zone name (order independent)
 ZONE_ARG=""
+RUN_TESTS=false
 for ARG in "$@"; do
     case "${ARG}" in
-        --dry-run) DRY_RUN=true ;;
-        *) ZONE_ARG="${ARG}" ;;
+        --dry-run)   DRY_RUN=true ;;
+        --run-tests) RUN_TESTS=true ;;
+        *)           ZONE_ARG="${ARG}" ;;
     esac
 done
+
+if "${RUN_TESTS}"; then
+    ZONES_DIR="${DDNS_DIR%/}/tests"
+    if [ ! -d "${ZONES_DIR}" ]; then
+        log_err "Tests directory not found: ${ZONES_DIR}"
+        exit 1
+    fi
+fi
+
 if [ -n "${ZONE_ARG}" ]; then
     if [ "${ZONE_ARG}" = "example.com" ]; then
         DRY_RUN=true
@@ -613,16 +630,18 @@ if [ -n "${ZONE_ARG}" ]; then
     fi
 else
     ZONE_DIRS=("${ZONES_DIR}"/*/)
-    REAL_ZONES=()
-    for Z in "${ZONE_DIRS[@]}"; do
-        [[ "$(basename "${Z}")" != "example.com" ]] && REAL_ZONES+=("${Z}")
-    done
-    if [ "${#REAL_ZONES[@]}" -eq 0 ]; then
-        log "No zones configured — running example.com as demo"
-        DRY_RUN=true
-        ZONE_DIRS=("${ZONES_DIR}/example.com/")
-    else
-        ZONE_DIRS=("${REAL_ZONES[@]}")
+    if ! "${RUN_TESTS}"; then
+        REAL_ZONES=()
+        for Z in "${ZONE_DIRS[@]}"; do
+            [[ "$(basename "${Z}")" != "example.com" ]] && REAL_ZONES+=("${Z}")
+        done
+        if [ "${#REAL_ZONES[@]}" -eq 0 ]; then
+            log "No zones configured — running example.com as demo"
+            DRY_RUN=true
+            ZONE_DIRS=("${ZONES_DIR}/example.com/")
+        else
+            ZONE_DIRS=("${REAL_ZONES[@]}")
+        fi
     fi
 fi
 
@@ -731,6 +750,11 @@ for ZONE_DIR in "${ZONE_DIRS[@]}"; do
 
     if [ "${OWNER}" != "root" ] || [ "${PERMS}" != "640" ]; then
         log_err "${RECORDS_FILE} must be owned by root with permissions 640, skipping"
+        continue
+    fi
+
+    if "${RUN_TESTS}" && [[ "${ZONE}" != *.test ]]; then
+        log_err "Test zone ${ZONE} does not use .test TLD (RFC 6761), skipping"
         continue
     fi
 
