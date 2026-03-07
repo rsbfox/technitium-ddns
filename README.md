@@ -5,7 +5,7 @@ _Not affiliated with or endorsed by Technitium._
 Dynamic DNS updater for [Technitium DNS Server](https://technitium.com/dns/).
 
 Reads standard BIND9 zone files and pushes records to Technitium via its HTTP
-API. Designed for self-hosted DNS on a home server with a dynamic WAN IP.
+API. Designed for self-hosted DNS on a home server with a dynamic IP.
 Supports split-horizon DNS so internal clients get LAN addresses and external
 clients get WAN addresses automatically.
 
@@ -72,13 +72,13 @@ sudo chmod 755 /usr/local/bin/technitium-ddns
 Install config and example zone:
 
 ```
-sudo mkdir -p /etc/technitium-ddns/example.com
+sudo mkdir -p /etc/technitium-ddns/zones/example.com
 sudo cp technitium-ddns.conf /etc/technitium-ddns/
-sudo cp example.com/main.zone /etc/technitium-ddns/example.com/
+sudo cp example.com/main.zone /etc/technitium-ddns/zones/example.com/
 sudo chown root:root /etc/technitium-ddns/technitium-ddns.conf
 sudo chmod 640 /etc/technitium-ddns/technitium-ddns.conf
-sudo chown root:root /etc/technitium-ddns/example.com/main.zone
-sudo chmod 640 /etc/technitium-ddns/example.com/main.zone
+sudo chown root:root /etc/technitium-ddns/zones/example.com/main.zone
+sudo chmod 640 /etc/technitium-ddns/zones/example.com/main.zone
 ```
 
 Edit the config:
@@ -96,11 +96,15 @@ sudo technitium-ddns --dry-run
 ## Usage
 
 ```
-sudo technitium-ddns                       # all zones
-sudo technitium-ddns your.domain           # one zone
-sudo technitium-ddns --dry-run             # preview all zones
-sudo technitium-ddns --dry-run your.domain # preview one zone
-sudo technitium-ddns example.com           # always dry run, feature demo
+sudo technitium-ddns                                          # all zones
+sudo technitium-ddns your.domain                              # one zone
+sudo technitium-ddns --dry-run                                # preview all zones
+sudo technitium-ddns --dry-run your.domain                    # preview one zone
+sudo technitium-ddns example.com                              # always dry run, feature demo
+sudo technitium-ddns --run-tests                              # run all zones in tests/
+sudo technitium-ddns --run-tests stress-test.test             # run one test zone
+sudo technitium-ddns --run-tests --dry-run                    # dry run all test zones
+sudo technitium-ddns --run-tests --dry-run stress-test.test   # dry run one test zone
 ```
 
 Override IPs without editing config:
@@ -111,18 +115,22 @@ sudo WAN=1.2.3.4 LAN=192.168.1.1 technitium-ddns
 
 ## Zone File Format
 
-Each zone is a directory under `/etc/technitium-ddns/` named after the zone's
-FQDN, containing a file called `main.zone`:
+Zones live under `zones/` inside the config directory, one subdirectory per
+zone named after the FQDN, each containing a `main.zone` file:
 
 ```
 /etc/technitium-ddns/
     technitium-ddns.conf
-    example.com/
-        main.zone          ← always dry run, feature demo
-    your.domain/
-        main.zone          ← your zone, must be root:root 640
-    0.168.192.in-addr.arpa/
-        main.zone          ← reverse zone
+    zones/
+        example.com/
+            main.zone      ← always dry run, feature demo
+        your.domain/
+            main.zone      ← your zone, must be root:root 640
+        0.168.192.in-addr.arpa/
+            main.zone      ← reverse zone
+    tests/
+        stress-test.test/
+            main.zone      ← must use .test TLD (RFC 6761)
 ```
 
 Zone files are standard BIND9 format. Copy and edit `example.com/main.zone`
@@ -169,6 +177,10 @@ All other apps accept JSON or empty.
 
 The stress-test zone is located at [tests/stress-test.test/main.zone](tests/stress-test.test/main.zone).  
 If you encounter a valid BIND9 record that the parser does not handle correctly, please open a PR to add it to the zone.
+
+Test zones must use the `.test` TLD (RFC 6761). The `.test` domain is reserved
+and never delegated in the public DNS, so records pushed to Technitium via
+`--run-tests` cannot leak to the internet.
 
 ## Configuration
 
