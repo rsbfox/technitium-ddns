@@ -2,8 +2,16 @@
 # /usr/local/bin/technitium-ddns
 #
 # Syncs BIND9-format zone files to a Technitium DNS server via its REST API.
-# Each subdirectory of /etc/technitium-ddns/ is treated as a zone, containing
-# a main.zone file in standard BIND9 format with optional extensions.
+# Zones live under zones/ inside the config directory, one subdirectory per zone
+# named after the FQDN, each containing a main.zone file:
+#
+# /etc/technitium-ddns/
+#     technitium-ddns.conf
+#     zones/
+#         example.com/main.zone   (always dry run — feature demo)
+#         your.domain/main.zone
+#     tests/
+#         stress-test.test/main.zone
 #
 # Zone file extensions beyond standard BIND9:
 #   APP         — Technitium DNS app record (e.g. Split Horizon, WildIp)
@@ -27,10 +35,10 @@
 #   sudo cp technitium-ddns.conf /etc/technitium-ddns/technitium-ddns.conf
 #   sudo chown root:root /etc/technitium-ddns/technitium-ddns.conf
 #   sudo chmod 640 /etc/technitium-ddns/technitium-ddns.conf
-#   sudo mkdir -p /etc/technitium-ddns/example.com
-#   sudo cp main.zone /etc/technitium-ddns/example.com/main.zone
-#   sudo chown root:root /etc/technitium-ddns/example.com/main.zone
-#   sudo chmod 640 /etc/technitium-ddns/example.com/main.zone
+#   sudo mkdir -p /etc/technitium-ddns/zones/example.com
+#   sudo cp example.com/main.zone /etc/technitium-ddns/zones/example.com/main.zone
+#   sudo chown root:root /etc/technitium-ddns/zones/example.com/main.zone
+#   sudo chmod 640 /etc/technitium-ddns/zones/example.com/main.zone
 #
 # OPTIONAL — automatic DNS updates on WAN IP change:
 #   Install wan-routable in /etc/networkd-dispatcher/routable.d/
@@ -48,6 +56,12 @@
 # DRY RUN (specific zone):
 #   sudo technitium-ddns --dry-run your.domain
 #
+# RUN TESTS (all test zones must use .test TLD per RFC 6761):
+#   sudo technitium-ddns --run-tests
+#
+# RUN TESTS (specific test zone):
+#   sudo technitium-ddns --run-tests stress-test.test
+#
 # OVERRIDE WAN OR LAN:
 #   sudo WAN=1.2.3.4 LAN=192.168.1.1 technitium-ddns
 #
@@ -56,6 +70,7 @@
 
 # Root directory for config and zone files — override with DDNS_DIR env var
 DDNS_DIR="${DDNS_DIR:-/etc/technitium-ddns}"
+DDNS_DIR="${DDNS_DIR%/}"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: technitium-ddns must be run as root" >&2
@@ -591,38 +606,56 @@ source "${CONF_FILE}"
 # Validate required config vars — TECH_TOKEN not required for dry run
 # WAN_IFACE and LAN_IFACE are only validated later if a zone actually needs them
 
-# Determine which zones to process
-ZONES_DIR="${DDNS_DIR%/}"
 shopt -s nullglob
-# Parse arguments — --dry-run and optional zone name (order independent)
+# Parse arguments — --dry-run, --run-tests, and optional zone name (order independent)
 ZONE_ARG=""
+RUN_TESTS=false
 for ARG in "$@"; do
     case "${ARG}" in
-        --dry-run) DRY_RUN=true ;;
-        *) ZONE_ARG="${ARG}" ;;
+        --dry-run)   DRY_RUN=true ;;
+        --run-tests) RUN_TESTS=true ;;
+        *)           ZONE_ARG="${ARG}" ;;
     esac
 done
+
+# Pick zones/ or tests/ subdirectory based on --run-tests flag
+if "${RUN_TESTS}"; then
+    ZONE_ROOTS="${DDNS_DIR}/tests"
+    if [ ! -d "${ZONE_ROOTS}" ]; then
+        log_err "Tests directory not found: ${ZONE_ROOTS}"
+        exit 1
+    fi
+else
+    ZONE_ROOTS="${DDNS_DIR}/zones"
+    if [ ! -d "${ZONE_ROOTS}" ]; then
+        log_err "Zones directory not found: ${ZONE_ROOTS}"
+        exit 1
+    fi
+fi
+
 if [ -n "${ZONE_ARG}" ]; then
     if [ "${ZONE_ARG}" = "example.com" ]; then
         DRY_RUN=true
     fi
-    ZONE_DIRS=("${ZONES_DIR}/${ZONE_ARG}/")
+    ZONE_DIRS=("${ZONE_ROOTS}/${ZONE_ARG}/")
     if [ ! -d "${ZONE_DIRS[0]}" ]; then
         log_err "Zone directory not found: ${ZONE_DIRS[0]}"
         exit 1
     fi
 else
-    ZONE_DIRS=("${ZONES_DIR}"/*/)
-    REAL_ZONES=()
-    for Z in "${ZONE_DIRS[@]}"; do
-        [[ "$(basename "${Z}")" != "example.com" ]] && REAL_ZONES+=("${Z}")
-    done
-    if [ "${#REAL_ZONES[@]}" -eq 0 ]; then
-        log "No zones configured — running example.com as demo"
-        DRY_RUN=true
-        ZONE_DIRS=("${ZONES_DIR}/example.com/")
-    else
-        ZONE_DIRS=("${REAL_ZONES[@]}")
+    ZONE_DIRS=("${ZONE_ROOTS}"/*/)
+    if ! "${RUN_TESTS}"; then
+        REAL_ZONES=()
+        for Z in "${ZONE_DIRS[@]}"; do
+            [[ "$(basename "${Z}")" != "example.com" ]] && REAL_ZONES+=("${Z}")
+        done
+        if [ "${#REAL_ZONES[@]}" -eq 0 ]; then
+            log "No zones configured — running example.com as demo"
+            DRY_RUN=true
+            ZONE_DIRS=("${ZONE_ROOTS}/example.com/")
+        else
+            ZONE_DIRS=("${REAL_ZONES[@]}")
+        fi
     fi
 fi
 
@@ -731,6 +764,11 @@ for ZONE_DIR in "${ZONE_DIRS[@]}"; do
 
     if [ "${OWNER}" != "root" ] || [ "${PERMS}" != "640" ]; then
         log_err "${RECORDS_FILE} must be owned by root with permissions 640, skipping"
+        continue
+    fi
+
+    if "${RUN_TESTS}" && [[ "${ZONE}" != *.test ]]; then
+        log_err "Test zone ${ZONE} does not use .test TLD (RFC 6761), skipping"
         continue
     fi
 
