@@ -1,4 +1,4 @@
-; /etc/technitium-ddns/example.com/main.zone
+; /etc/technitium-ddns/zones/example.com/main.zone
 ;
 ; Example zone for technitium-ddns — run with:
 ;   sudo technitium-ddns example.com
