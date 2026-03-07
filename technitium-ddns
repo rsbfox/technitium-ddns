@@ -648,10 +648,28 @@ done
 if "${NEEDS_WAN}"; then
     if [ -z "${WAN}" ]; then
         if [ -z "${WAN_IFACE}" ]; then
-            log_err "WAN_IFACE not set in ${CONF_FILE} (or override with: sudo WAN=1.2.3.4 technitium-ddns)"
-            exit 1
+            if "${DRY_RUN}"; then
+                WAN="YOUR.WAN.IP"
+            else
+                log_err "WAN_IFACE not set in ${CONF_FILE} (or override with: sudo WAN=1.2.3.4 technitium-ddns)"
+                exit 1
+            fi
+        else
+            WAN=$(ip -4 addr show "${WAN_IFACE}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
         fi
-        WAN=$(ip -4 addr show "${WAN_IFACE}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
+    fi
+    if [ -z "${WAN}" ]; then
+        if [ -z "${WAN_IFACE}" ]; then
+            if "${DRY_RUN}"; then
+                log "WARNING: WAN_IFACE not set in ${CONF_FILE} — running example.com as demo with WAN=1.2.3.4 and LAN=10.0.0.1"
+                WAN="1.2.3.4"
+            else
+                log_err "WAN_IFACE not set in ${CONF_FILE} (or override with: sudo WAN=1.2.3.4 technitium-ddns)"
+                exit 1
+            fi
+        else
+            WAN=$(ip -4 addr show "${WAN_IFACE}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
+        fi
     fi
     if [ -z "${WAN}" ]; then
         log_err "Could not determine WAN IP from ${WAN_IFACE}"
@@ -671,10 +689,15 @@ fi
 if "${NEEDS_LAN}"; then
     if [ -z "${LAN}" ]; then
         if [ -z "${LAN_IFACE}" ]; then
-            log_err "LAN_IFACE not set in ${CONF_FILE} (or override with: sudo LAN=192.168.1.1 technitium-ddns)"
-            exit 1
+            if "${DRY_RUN}"; then
+                LAN="10.0.0.1"
+            else
+                log_err "LAN_IFACE not set in ${CONF_FILE} (or override with: sudo LAN=192.168.1.1 technitium-ddns)"
+                exit 1
+            fi
+        else
+            LAN=$(ip -4 addr show "${LAN_IFACE}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
         fi
-        LAN=$(ip -4 addr show "${LAN_IFACE}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
     fi
     if [ -z "${LAN}" ]; then
         log_err "Could not determine LAN IP from ${LAN_IFACE}"
