@@ -2,8 +2,8 @@
 # /usr/local/bin/technitium-ddns
 #
 # Syncs BIND9-format zone files to a Technitium DNS server via its REST API.
-# Zone files are located in the zones/ subdirectory under the config root, one directory
-# per zone named after the zone FQDN, each containing a main.zone file.
+# Zones live under zones/ inside the config directory, one subdirectory per zone
+# named after the FQDN, each containing a main.zone file:
 #
 # /etc/technitium-ddns/
 #     technitium-ddns.conf
