@@ -590,10 +590,6 @@ source "${CONF_FILE}"
 
 # Validate required config vars — TECH_TOKEN not required for dry run
 # WAN_IFACE and LAN_IFACE are only validated later if a zone actually needs them
-if ! "${DRY_RUN}" && [ -z "${TECH_TOKEN}" ]; then
-    log_err "TECH_TOKEN not set in ${CONF_FILE}"
-    exit 1
-fi
 
 # Determine which zones to process
 ZONES_DIR="${DDNS_DIR%/}"
@@ -628,6 +624,13 @@ else
     else
         ZONE_DIRS=("${REAL_ZONES[@]}")
     fi
+fi
+
+# TECH_TOKEN required for real runs — checked after zone discovery so the
+# no-zones demo path can set DRY_RUN=true before we get here
+if ! "${DRY_RUN}" && [ -z "${TECH_TOKEN}" ]; then
+    log_err "TECH_TOKEN not set in ${CONF_FILE}"
+    exit 1
 fi
 
 # Check which placeholders are needed
