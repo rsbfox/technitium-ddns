@@ -27,7 +27,7 @@ fi
 
 # Install example zone
 mkdir -p /etc/technitium-ddns/zones/example.com
-cp example.com/main.zone /etc/technitium-ddns/zones/example.com/main.zone
+cp zones/example.com/main.zone /etc/technitium-ddns/zones/example.com/main.zone
 chown root:root /etc/technitium-ddns/zones/example.com/main.zone
 chmod 640 /etc/technitium-ddns/zones/example.com/main.zone
 
