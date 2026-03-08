@@ -39,20 +39,6 @@ in the label itself, e.g. `1.2.3.4.wildip.example.com → A 1.2.3.4`.
 
 **FreeDNS** ([freedns.afraid.org](https://freedns.afraid.org)) — free dynamic DNS. Register subdomains on any of thousands of community-shared domains. They also support pointing an NS record at your own server, making Technitium authoritative for that subdomain — enabling wildcard records, split-horizon DNS, and automated DNS-01 Let's Encrypt challenges. Set FREEDNS_KEYS in the config to push IP updates on each run.
 
-#UNTESTED **wan-routable** — a networkd-dispatcher script that triggers `technitium-ddns`
-automatically when the WAN interface obtains a new routable IP. Requires
-`systemd-networkd` and `networkd-dispatcher`.
-
-Install:
-
-```
-sudo cp wan-routable /etc/networkd-dispatcher/routable.d/wan-routable
-sudo chown root:root /etc/networkd-dispatcher/routable.d/wan-routable
-sudo chmod 755 /etc/networkd-dispatcher/routable.d/wan-routable
-```
-
-Edit `WAN_IFACE` at the top of `wan-routable` to match your interface name.
-
 ## Install
 
 Install dependencies:
@@ -61,24 +47,11 @@ Install dependencies:
 sudo apt install grepcidr jq gettext-base curl perl
 ```
 
-Install the script:
-
+Install:
 ```
-sudo cp technitium-ddns /usr/local/bin/technitium-ddns
-sudo chown root:root /usr/local/bin/technitium-ddns
-sudo chmod 755 /usr/local/bin/technitium-ddns
-```
-
-Install config and example zone:
-
-```
-sudo mkdir -p /etc/technitium-ddns/zones/example.com
-sudo cp technitium-ddns.conf /etc/technitium-ddns/
-sudo cp example.com/main.zone /etc/technitium-ddns/zones/example.com/
-sudo chown root:root /etc/technitium-ddns/technitium-ddns.conf
-sudo chmod 640 /etc/technitium-ddns/technitium-ddns.conf
-sudo chown root:root /etc/technitium-ddns/zones/example.com/main.zone
-sudo chmod 640 /etc/technitium-ddns/zones/example.com/main.zone
+git clone https://github.com/rsbfox/technitium-ddns
+cd technitium-ddns
+sudo bash install.sh
 ```
 
 Edit the config:
@@ -96,15 +69,15 @@ sudo technitium-ddns --dry-run
 ## Usage
 
 ```
-sudo technitium-ddns                                          # all zones
-sudo technitium-ddns your.domain                              # one zone
-sudo technitium-ddns --dry-run                                # preview all zones
-sudo technitium-ddns --dry-run your.domain                    # preview one zone
-sudo technitium-ddns example.com                              # always dry run, feature demo
-sudo technitium-ddns --run-tests                              # run all zones in tests/
-sudo technitium-ddns --run-tests stress-test.test             # run one test zone
-sudo technitium-ddns --run-tests --dry-run                    # dry run all test zones
-sudo technitium-ddns --run-tests --dry-run stress-test.test   # dry run one test zone
+sudo technitium-ddns                                     # all zones
+sudo technitium-ddns your.domain                         # one zone
+sudo technitium-ddns --dry-run                           # preview all zones
+sudo technitium-ddns --dry-run your.domain               # preview one zone
+sudo technitium-ddns example.com                         # always dry run, feature demo
+sudo technitium-ddns --run-tests                         # run all zones in tests/
+sudo technitium-ddns --run-tests stress.test             # run one test zone
+sudo technitium-ddns --run-tests --dry-run               # dry run all test zones
+sudo technitium-ddns --run-tests --dry-run stress.test   # dry run one test zone
 ```
 
 Override IPs without editing config:
@@ -129,7 +102,7 @@ zone named after the FQDN, each containing a `main.zone` file:
         0.168.192.in-addr.arpa/
             main.zone      ← reverse zone
     tests/
-        stress-test.test/
+        stress.test/
             main.zone      ← must use .test TLD (RFC 6761)
 ```
 
@@ -175,7 +148,7 @@ All other apps accept JSON or empty.
 
 ## Stress Test Zone
 
-The stress-test zone is located at [tests/stress-test.test/main.zone](tests/stress-test.test/main.zone).  
+The stress-test zone is located at [tests/stress.test/main.zone](tests/stress.test/main.zone).  
 If you encounter a valid BIND9 record that the parser does not handle correctly, please open a PR to add it to the zone.
 
 Test zones must use the `.test` TLD (RFC 6761). The `.test` domain is reserved
@@ -200,4 +173,18 @@ records need neither.
 
 ## Status
 
-Tested on Ubuntu 24.04 VM with Technitium DNS Server. wan-routable needs tested. Vibe coded. Use at your own risk.
+Tested on Ubuntu 24.04 VM with Technitium DNS Server. Use at your own risk.
+
+#UNTESTED **wan-routable** — a networkd-dispatcher script that triggers `technitium-ddns`
+automatically when the WAN interface obtains a new routable IP. Requires
+`systemd-networkd` and `networkd-dispatcher`.
+
+Install:
+
+```
+sudo cp wan-routable /etc/networkd-dispatcher/routable.d/wan-routable
+sudo chown root:root /etc/networkd-dispatcher/routable.d/wan-routable
+sudo chmod 755 /etc/networkd-dispatcher/routable.d/wan-routable
+```
+
+Edit `WAN_IFACE` at the top of `wan-routable` to match your interface name.

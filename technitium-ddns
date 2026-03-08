@@ -11,7 +11,7 @@
 #         example.com/main.zone   (always dry run — feature demo)
 #         your.domain/main.zone
 #     tests/
-#         stress-test.test/main.zone
+#         stress.test/main.zone
 #
 # Zone file extensions beyond standard BIND9:
 #   APP         — Technitium DNS app record (e.g. Split Horizon, WildIp)
@@ -21,28 +21,12 @@
 #   serial auto — SOA serial keyword enabling Technitium's date scheme
 #
 # DEPENDENCIES:
-#   grepcidr   — apt install grepcidr
-#   jq         — apt install jq
-#   envsubst   — apt install gettext-base
-#   curl       — apt install curl
-#   perl       — apt install perl
+#   sudo apt install grepcidr jq gettext-base curl perl
 #
 # INSTALL:
-#   sudo cp technitium-ddns /usr/local/bin/technitium-ddns
-#   sudo chown root:root /usr/local/bin/technitium-ddns
-#   sudo chmod 755 /usr/local/bin/technitium-ddns
-#   sudo mkdir -p /etc/technitium-ddns
-#   sudo cp technitium-ddns.conf /etc/technitium-ddns/technitium-ddns.conf
-#   sudo chown root:root /etc/technitium-ddns/technitium-ddns.conf
-#   sudo chmod 640 /etc/technitium-ddns/technitium-ddns.conf
-#   sudo mkdir -p /etc/technitium-ddns/zones/example.com
-#   sudo cp example.com/main.zone /etc/technitium-ddns/zones/example.com/main.zone
-#   sudo chown root:root /etc/technitium-ddns/zones/example.com/main.zone
-#   sudo chmod 640 /etc/technitium-ddns/zones/example.com/main.zone
-#
-# OPTIONAL — automatic DNS updates on WAN IP change:
-#   Install wan-routable in /etc/networkd-dispatcher/routable.d/
-#   Requires: systemd-networkd, networkd-dispatcher
+#   git clone https://github.com/rsbfox/technitium-ddns
+#   cd technitium-ddns
+#   sudo bash install.sh
 #
 # RUN (all zones):
 #   sudo technitium-ddns
@@ -60,7 +44,7 @@
 #   sudo technitium-ddns --run-tests
 #
 # RUN TESTS (specific test zone):
-#   sudo technitium-ddns --run-tests stress-test.test
+#   sudo technitium-ddns --run-tests stress.test
 #
 # OVERRIDE WAN OR LAN:
 #   sudo WAN=1.2.3.4 LAN=192.168.1.1 technitium-ddns
