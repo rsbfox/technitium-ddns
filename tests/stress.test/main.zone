@@ -1,12 +1,12 @@
-; /etc/technitium-ddns/stress-test.test/main.zone
+; /etc/technitium-ddns/stress.test/main.zone
 
-$ORIGIN stress-test.test.
+$ORIGIN stress.test.
 $TTL 3600
 
 ; ============================================================
 ; SOA - multiline with time-unit suffixes and inline comments
 ; ============================================================
-@   IN  SOA ns1.stress-test.test. hostmaster.stress-test.test. (
+@   IN  SOA ns1.stress.test. hostmaster.stress.test. (
         2026030801  ; serial
         3H          ; refresh
         15M         ; retry
@@ -43,7 +43,7 @@ cluster IN  AAAA    2001:db8::10
 ; ============================================================
 @   IN  MX  10  mail
 @   IN  MX  20  mail2
-@   IN  MX  30  mail.backup.stress-test.test.
+@   IN  MX  30  mail.backup.stress.test.
 
 ; ============================================================
 ; TXT records - single string, multi-string, multiline parens
@@ -59,8 +59,8 @@ dkim._domainkey IN TXT (
 ; DMARC - multi-string with semicolons inside quotes
 _dmarc  IN  TXT (
     "v=DMARC1; p=reject; "
-    "rua=mailto:dmarc@stress-test.test; "
-    "ruf=mailto:dmarc@stress-test.test" )
+    "rua=mailto:dmarc@stress.test; "
+    "ruf=mailto:dmarc@stress.test" )
 
 ; mta-sts policy
 _mta-sts    IN  TXT "v=STSv1; id=20260301"
@@ -69,7 +69,7 @@ _mta-sts    IN  TXT "v=STSv1; id=20260301"
 ; CNAME records - relative and absolute targets
 ; ============================================================
 www     IN  CNAME   cluster
-ftp     IN  CNAME   ns1.stress-test.test.
+ftp     IN  CNAME   ns1.stress.test.
 mail    IN  A       192.0.2.20
 mail2   IN  A       192.0.2.21
 
@@ -147,7 +147,7 @@ $APP
 ; ============================================================
 ; $ORIGIN shift into subdomain
 ; ============================================================
-$ORIGIN dev.stress-test.test.
+$ORIGIN dev.stress.test.
 
 api         IN  A       192.0.2.200
 @           IN  MX  10  mail
