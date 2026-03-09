@@ -1,0 +1,770 @@
+#!/bin/bash
+# /usr/local/bin/technitium-ddns
+#
+# Syncs BIND 9 format zone files to a Technitium DNS server via its REST API.
+# Zones live under zones/ inside the config directory, one subdirectory per zone
+# named after the FQDN, each containing a main.zone file:
+#
+# /etc/technitium-ddns/
+#     technitium-ddns.conf
+#     zones/
+#         example.com/main.zone   (always dry run — feature demo)
+#         your.domain/main.zone
+#     tests/
+#         stress.test/main.zone
+#
+# Zone file extensions beyond standard BIND 9:
+#   APP         — Technitium DNS app record (e.g. Split Horizon, WildIp)
+#   $APP        — sets app name and class path for subsequent APP records
+#   ${WAN}      — replaced at runtime with detected WAN IP address
+#   ${LAN}      — replaced at runtime with detected LAN IP address
+#   serial auto — SOA serial keyword enabling Technitium's date scheme
+#
+# DEPENDENCIES:
+#   grepcidr       # filter IPs by CIDR
+#   jq             # parse JSON
+#   gettext-base   # provides envsubst
+#
+# INSTALL:
+#   git clone https://github.com/rsbfox/technitium-ddns
+#   cd technitium-ddns
+#   sudo bash install.sh
+#
+# RUN (all zones):
+#   sudo technitium-ddns
+#
+# RUN (specific zone):
+#   sudo technitium-ddns your.domain
+#
+# DRY RUN (all zones — no API calls, prints what would be sent):
+#   sudo technitium-ddns --dry-run
+#
+# DRY RUN (specific zone):
+#   sudo technitium-ddns --dry-run your.domain
+#
+# RUN TESTS (all test zones must use .test TLD per RFC 6761):
+#   sudo technitium-ddns --run-tests
+#
+# RUN TESTS (specific test zone):
+#   sudo technitium-ddns --run-tests stress.test
+#
+# OVERRIDE WAN OR LAN:
+#   sudo WAN=1.2.3.4 LAN=192.168.1.1 technitium-ddns
+#
+# OVERRIDE ROOT DIRECTORY:
+#   sudo DDNS_DIR=/path/to/dir technitium-ddns
+
+# Root directory for config and zone files — override with DDNS_DIR env var
+DDNS_DIR="${DDNS_DIR:-/etc/technitium-ddns}"
+DDNS_DIR="${DDNS_DIR%/}"
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: technitium-ddns must be run as root" >&2
+    exit 1
+fi
+DRY_RUN=false
+
+BOGON_RANGES="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16"
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+log() {
+    if [ -t 1 ]; then
+        echo "$1"
+    else
+        logger -t technitium-ddns "$1"
+    fi
+}
+
+log_err() {
+    if [ -t 1 ]; then
+        echo "ERROR: $1" >&2
+    else
+        logger -t technitium-ddns "ERROR: $1"
+    fi
+}
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+# Strip ; comments from a line, protecting quoted strings and \X escape sequences.
+# Used in preprocess_zone (paren collapsing) and process_zone (before tokenizing).
+strip_comment() {
+    perl -pe 's/("(?:\\.|[^"\\])*"|\\.)|;.*$/$1/g' <<< "$1"
+}
+
+# Unescape a single token: \DDD (0-255) → char, \X → X, \DDD (>255) → unchanged
+# Quoted string tokens: strips outer quotes and unescapes interior
+unescape_token() {
+    perl -pe '
+        if (/^"((?:\\.|[^"])*)"$/s) {
+            my $inner = $1;
+            $inner =~ s/\\(?:([0-9]{3})|(.))/defined $1 ? ($1<=255 ? chr($1) : "\\$1") : $2/ge;
+            $_ = "$inner\n";
+        } else {
+            s/\\(?:([0-9]{3})|(.))/defined $1 ? ($1<=255 ? chr($1) : "\\$1") : $2/ge;
+        }
+    ' <<< "$1"
+}
+
+# Tokenize a BIND 9 line into an array stored in global BIND_TOKENS[]
+# Handles: quoted strings, escape sequences, comments, arbitrary whitespace
+# Sets global BIND_TOKENS array
+tokenize_bind_line() {
+    local INPUT="$1"
+    BIND_TOKENS=()
+    while IFS= read -r -d '' token; do
+        BIND_TOKENS+=("$(unescape_token "${token}")")
+    done < <(echo -n "${INPUT}" | perl -0777 -ne '
+        while (/(?:"(?:\\.|[^"])*"|\\.|\S)+/g) {
+            print "$&\0";
+        }
+    ')
+}
+
+# Convert BIND 9 TTL string (e.g. 1h, 2d, 15m) to seconds
+ttl_to_seconds() {
+    local INPUT="$1"
+    [[ "$INPUT" =~ ^[0-9]+$ ]] && echo "$INPUT" && return
+    local total=0 num="" i c
+    for (( i=0; i<${#INPUT}; i++ )); do
+        c="${INPUT:$i:1}"
+        if [[ "$c" =~ [0-9] ]]; then
+            num+="$c"
+        else
+            case "${c,,}" in
+                w) total=$(( total + num * 604800 )) ;;
+                d) total=$(( total + num * 86400 )) ;;
+                h) total=$(( total + num * 3600 )) ;;
+                m) total=$(( total + num * 60 )) ;;
+                s) total=$(( total + num )) ;;
+            esac
+            num=""
+        fi
+    done
+    [[ -n "$num" ]] && total=$(( total + num ))
+    echo "$total"
+}
+
+# Resolve a name to FQDN relative to current zone
+get_fqdn() {
+    local INPUT="$1"
+    local ORIGIN="${2:-${ZONE}}"
+    if [ "${INPUT}" = "@" ]; then
+        echo "${ORIGIN}"
+    elif [[ "${INPUT}" == *. ]]; then
+        echo "${INPUT%.}"
+    else
+        echo "${INPUT}.${ORIGIN}"
+    fi
+}
+
+# ============================================================
+# API
+# ============================================================
+
+tech_update() {
+    local DOMAIN="$1"
+    local TYPE="$2"
+    local TTL="$3"
+    local OVERWRITE="$4"
+    shift 4
+    local ARGS=()
+    [[ -n "$TTL" ]] && ARGS+=(--data-urlencode "ttl=${TTL}")
+    if "${DRY_RUN}"; then
+        echo "    ${TYPE} ${DOMAIN} ttl=${TTL}"
+        local arg val
+        for arg in "$@"; do
+            if [[ "${arg}" == --data-urlencode ]]; then continue; fi
+            val="${arg#*=}"
+            echo "        ${arg%%=*}: ${val}"
+        done
+        return 0
+    fi
+    local RESPONSE STATUS
+    RESPONSE=$(curl -s -G --max-time 30 "${TECH_API_BASE}/zones/records/add" \
+        --data-urlencode "token=${TECH_TOKEN}" \
+        --data-urlencode "domain=${DOMAIN}" \
+        --data-urlencode "type=${TYPE}" \
+        --data-urlencode "overwrite=${OVERWRITE}" \
+        "${ARGS[@]}" \
+        "$@")
+    STATUS=$(echo "${RESPONSE}" | jq -r '.status')
+    if [ "${STATUS}" != "ok" ]; then
+        log_err "$(echo "${RESPONSE}" | jq -r '.errorMessage') [${TYPE} ${DOMAIN}]"
+        return 1
+    fi
+    log "${TYPE} ${DOMAIN}"
+}
+
+tech_ensure_zone() {
+    local ZONE="$1"
+    if "${DRY_RUN}"; then
+        return 0
+    fi
+    local RESPONSE STATUS
+    RESPONSE=$(curl -s -G --max-time 30 "${TECH_API_BASE}/zones/list" \
+        --data-urlencode "token=${TECH_TOKEN}")
+    STATUS=$(echo "${RESPONSE}" | jq -r '.status')
+    if [ "${STATUS}" != "ok" ]; then
+        log_err "Failed to list zones: $(echo "${RESPONSE}" | jq -r '.errorMessage')"
+        return 1
+    fi
+    if echo "${RESPONSE}" | jq -e --arg z "${ZONE}" '.response.zones[] | select(.name == $z)' > /dev/null 2>&1; then
+        return 0
+    fi
+    log "Creating zone: ${ZONE}"
+    RESPONSE=$(curl -s -G --max-time 30 "${TECH_API_BASE}/zones/create" \
+        --data-urlencode "token=${TECH_TOKEN}" \
+        --data-urlencode "zone=${ZONE}" \
+        --data-urlencode "type=Primary")
+    STATUS=$(echo "${RESPONSE}" | jq -r '.status')
+    if [ "${STATUS}" != "ok" ]; then
+        log_err "Failed to create zone ${ZONE}: $(echo "${RESPONSE}" | jq -r '.errorMessage')"
+        return 1
+    fi
+}
+
+# ============================================================
+# ZONE PROCESSING
+# ============================================================
+
+preprocess_zone() {
+    local FILE="$1"
+    local ACCUM="" IN_PAREN=false
+
+    while IFS= read -r LINE; do
+        # Strip Windows carriage returns
+        LINE="${LINE//$'\r'/}"
+
+        if ${IN_PAREN}; then
+            # Strip inline ; comments (with or without space before)
+            local CONT
+            CONT=$(strip_comment "${LINE}")
+            # Strip leading/trailing whitespace from continuation
+            CONT="${CONT#"${CONT%%[![:space:]]*}"}"
+            CONT="${CONT%"${CONT##*[![:space:]]}"}"
+
+            if [[ "${CONT}" == *")"* ]]; then
+                # Grab everything before closing paren
+                local BEFORE="${CONT%%)*}"
+                BEFORE="${BEFORE%"${BEFORE##*[![:space:]]}"}"
+                [[ -n "${BEFORE}" ]] && ACCUM="${ACCUM} ${BEFORE}"
+                echo "${ACCUM}"
+                ACCUM=""
+                IN_PAREN=false
+            else
+                [[ -n "${CONT}" ]] && ACCUM="${ACCUM} ${CONT}"
+            fi
+        else
+            if [[ "${LINE}" == *"("* ]]; then
+                if [[ "${LINE}" == *")"* ]]; then
+                    # Opening and closing paren on same line — strip both and emit
+                    local STRIPPED="${LINE//(/}"
+                    STRIPPED="${STRIPPED//)/}"
+                    STRIPPED=$(strip_comment "${STRIPPED}")
+                    echo "${STRIPPED}"
+                else
+                    # Start of multiline paren block
+                    # Capture everything before ( as the record prefix
+                    ACCUM="${LINE%%(*}"
+                    ACCUM=$(strip_comment "${ACCUM}")
+                    ACCUM="${ACCUM%"${ACCUM##*[![:space:]]}"}"
+                    # Also capture anything after ( on the same line
+                    local AFTER_PAREN="${LINE#*(}"
+                    AFTER_PAREN=$(strip_comment "${AFTER_PAREN}")
+                    AFTER_PAREN="${AFTER_PAREN#"${AFTER_PAREN%%[![:space:]]*}"}"
+                    AFTER_PAREN="${AFTER_PAREN%"${AFTER_PAREN##*[![:space:]]}"}"
+                    [[ -n "${AFTER_PAREN}" ]] && ACCUM="${ACCUM} ${AFTER_PAREN}"
+                    IN_PAREN=true
+                fi
+            else
+                # Pass through completely unchanged — preserve leading whitespace
+                # for inherited name detection in process_zone
+                echo "${LINE}"
+            fi
+        fi
+    done < "${FILE}"
+}
+
+process_zone() {
+    local ZONE="$1"
+    local RECORDS_FILE="$2"
+    local DEFAULT_TTL="" LAST_NAME="@"
+    local CURRENT_ORIGIN="${ZONE}"
+    local CURRENT_APP_CLASS="" CURRENT_APP_NAME=""
+    declare -A SEEN_RECORDS
+
+    "${DRY_RUN}" && printf '[dry run] '
+    log "Zone: ${ZONE}"
+
+    while IFS= read -r LINE; do
+        # Strip Windows carriage returns
+        LINE="${LINE//$'\r'/}"
+
+        # Detect inherited name BEFORE stripping leading whitespace
+        local INHERITED=false
+        [[ "${LINE}" =~ ^[[:space:]] ]] && INHERITED=true
+
+        # Strip leading/trailing whitespace
+        LINE="${LINE#"${LINE%%[![:space:]]*}"}"
+        LINE="${LINE%"${LINE##*[![:space:]]}"}"
+
+        # Skip empty lines and full-line ; comments
+        local COMMENT_RE='^;'
+        [[ -z "${LINE}" || "${LINE}" =~ ${COMMENT_RE} ]] && continue
+
+        # Strip ; comments before tokenizing
+        LINE=$(strip_comment "${LINE}")
+
+        # Substitute placeholders
+        LINE=$(printf '%s' "${LINE}" | envsubst '${WAN} ${LAN}')
+
+        # Handle $TTL directive
+        if [[ "${LINE^^}" =~ ^\$TTL[[:space:]] ]]; then
+            local RAW_TTL
+            read -r _ RAW_TTL <<< "${LINE}"
+            DEFAULT_TTL=$(ttl_to_seconds "${RAW_TTL}")
+            continue
+        fi
+
+        # Handle $ORIGIN directive
+        if [[ "${LINE^^}" =~ ^\$ORIGIN[[:space:]] ]]; then
+            local NEW_ORIGIN
+            read -r _ NEW_ORIGIN <<< "${LINE}"
+            NEW_ORIGIN="${NEW_ORIGIN,,}"
+            if [[ "${NEW_ORIGIN}" == *. ]]; then
+                # Absolute origin — strip trailing dot and use as-is
+                CURRENT_ORIGIN="${NEW_ORIGIN%.}"
+            else
+                # Relative origin — prepend to current origin
+                CURRENT_ORIGIN=$(get_fqdn "${NEW_ORIGIN}" "${CURRENT_ORIGIN}")
+            fi
+            continue
+        fi
+
+        # Handle $APP directive: $APP classPath App Name
+        if [[ "${LINE^^}" =~ ^\$APP([[:space:]]|$) ]]; then
+            local APP_REST
+            read -r _ APP_REST <<< "${LINE}"
+            CURRENT_APP_CLASS="${APP_REST%% *}"
+            CURRENT_APP_NAME="${APP_REST#* }"
+            if [[ -z "${CURRENT_APP_CLASS}" || -z "${CURRENT_APP_NAME}" || "${CURRENT_APP_CLASS}" == "${CURRENT_APP_NAME}" ]]; then
+                log_err "Invalid \$APP directive, expected: \$APP classPath App Name"
+                CURRENT_APP_CLASS=""
+                CURRENT_APP_NAME=""
+            fi
+            continue
+        fi
+
+        # Skip other directives; SOA is handled in case statement below
+        [[ "${LINE}" =~ ^\$ ]] && continue
+
+        # Tokenize — handles quoted strings, escape sequences, arbitrary whitespace
+        tokenize_bind_line "${LINE}"
+        local i=0 NAME="" REC_TTL="" TYPE=""
+
+        # Determine name
+        if ${INHERITED}; then
+            NAME="${LAST_NAME}"
+        else
+            # Check for out-of-range \DDD escapes (unescape_token passes them through intact)
+            if [[ "${BIND_TOKENS[0]}" =~ \\[0-9]{3} ]]; then
+                log_err "Out-of-range escape in label [${BIND_TOKENS[0]}], skipping"
+                continue
+            fi
+            NAME="${BIND_TOKENS[0],,}"
+            NAME="${NAME%.}"
+            LAST_NAME="${NAME}"
+            (( i++ ))
+        fi
+
+        # Scan remaining tokens for optional TTL and CLASS, then TYPE
+        while [ "${i}" -lt "${#BIND_TOKENS[@]}" ]; do
+            local TOKEN="${BIND_TOKENS[$i]}"
+            if [[ "${TOKEN}" =~ ^[0-9]+$ ]]; then
+                REC_TTL=$(ttl_to_seconds "${TOKEN}")
+            elif [[ "${TOKEN^^}" =~ ^[0-9]+[WDHMS]$ ]]; then
+                REC_TTL=$(ttl_to_seconds "${TOKEN}")
+            elif [[ "${TOKEN^^}" =~ ^(IN|CH|HS|ANY)$ ]]; then
+                : # skip class
+            else
+                TYPE="${TOKEN^^}"
+                (( i++ ))
+                break
+            fi
+            (( i++ ))
+        done
+
+        [[ -z "${TYPE}" ]] && continue
+
+        local TTL="${REC_TTL:-${DEFAULT_TTL}}"
+        local VALUE="${BIND_TOKENS[*]:$i}"
+
+        if [[ -z "${VALUE}" && "${TYPE}" != "APP" ]]; then
+            log_err "Empty value for ${TYPE} ${NAME}, skipping"
+            continue
+        fi
+
+        local DOMAIN
+        DOMAIN=$(get_fqdn "${NAME}" "${CURRENT_ORIGIN}")
+
+        local RR_KEY="${DOMAIN}:${TYPE}"
+        local OVERWRITE="true"
+        if [[ -n "${SEEN_RECORDS[${RR_KEY}]+x}" ]]; then
+            OVERWRITE="false"
+        fi
+        SEEN_RECORDS[${RR_KEY}]=1
+
+        case "${TYPE}" in
+            A|AAAA)
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" \
+                    --data-urlencode "ipAddress=${VALUE}"
+                ;;
+            CNAME)
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" \
+                    --data-urlencode "cname=$(get_fqdn "${VALUE}" "${CURRENT_ORIGIN}")"
+                ;;
+            NS)
+                local NS_TARGET
+                NS_TARGET=$(get_fqdn "${VALUE}" "${CURRENT_ORIGIN}")
+                NS_TARGET="${NS_TARGET,,}"
+                if [ "${NS_TARGET}" = "${ZONE}" ]; then
+                    log_err "NS record cannot point to zone apex ${ZONE}, skipping"
+                    continue
+                fi
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" \
+                    --data-urlencode "nameServer=${NS_TARGET}"
+                ;;
+            PTR)
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" \
+                    --data-urlencode "ptrName=${VALUE}"
+                ;;
+            TXT)
+                # Quotes already stripped by unescape_token in tokenize_bind_line
+                # Multi-part strings e.g. "v=DKIM1;" "p=abc" arrive as: v=DKIM1; p=abc
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" \
+                    --data-urlencode "text=${VALUE}"
+                ;;
+            MX)
+                local PREF EXCHANGE
+                read -r PREF EXCHANGE <<< "${VALUE}"
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" \
+                    --data-urlencode "preference=${PREF}" \
+                    --data-urlencode "exchange=$(get_fqdn "${EXCHANGE}" "${CURRENT_ORIGIN}")"
+                ;;
+            SRV)
+                local PRIORITY WEIGHT PORT TARGET
+                read -r PRIORITY WEIGHT PORT TARGET <<< "${VALUE}"
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" \
+                    --data-urlencode "priority=${PRIORITY}" \
+                    --data-urlencode "weight=${WEIGHT}" \
+                    --data-urlencode "port=${PORT}" \
+                    --data-urlencode "target=$(get_fqdn "${TARGET}" "${CURRENT_ORIGIN}")"
+                ;;
+            CAA)
+                local CAA_FLAGS CAA_TAG CAA_VALUE
+                read -r CAA_FLAGS CAA_TAG CAA_VALUE <<< "${VALUE}"
+                # unescape_token already strips quotes; strip defensively in case of bare value
+                CAA_VALUE="${CAA_VALUE#\"}"
+                CAA_VALUE="${CAA_VALUE%\"}"
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" \
+                    --data-urlencode "flags=${CAA_FLAGS}" \
+                    --data-urlencode "tag=${CAA_TAG}" \
+                    --data-urlencode "value=${CAA_VALUE}"
+                ;;
+            APP)
+                if [[ -z "${CURRENT_APP_CLASS}" ]]; then
+                    log_err "APP record before \$APP directive for ${DOMAIN}, skipping"
+                    continue
+                fi
+                local RECORD_DATA=""
+                if [[ "${CURRENT_APP_CLASS}" == "SplitHorizon.SimpleAddress" ]]; then
+                    if [[ "${VALUE}" == "true" ]]; then
+                        RECORD_DATA=$(printf '{"private":["%s"],"public":["%s"]}' "${LAN}" "${WAN}")
+                    elif [[ "${VALUE}" == "false" ]]; then
+                        RECORD_DATA=$(printf '{"private":["%s"]}' "${LAN}")
+                    elif [[ "${VALUE}" == "{"* ]]; then
+                        RECORD_DATA="${VALUE}"
+                    elif [[ -n "${VALUE}" ]]; then
+                        log_err "APP SplitHorizon.SimpleAddress expects true, false, JSON, or empty for ${DOMAIN}, skipping"
+                        continue
+                    fi
+                else
+                    if [[ -n "${VALUE}" ]]; then
+                        # Validate it looks like JSON
+                        if [[ "${VALUE}" != "{"* ]]; then
+                            log_err "APP ${CURRENT_APP_CLASS} expects JSON or empty value for ${DOMAIN}, skipping"
+                            continue
+                        fi
+                        RECORD_DATA="${VALUE}"
+                    fi
+                fi
+                local APP_ARGS=(
+                    --data-urlencode "appName=${CURRENT_APP_NAME}"
+                    --data-urlencode "classPath=${CURRENT_APP_CLASS}"
+                )
+                [[ -n "${RECORD_DATA}" ]] && APP_ARGS+=(--data-urlencode "recordData=${RECORD_DATA}")
+                tech_update "${DOMAIN}" "${TYPE}" "${TTL}" "${OVERWRITE}" "${APP_ARGS[@]}"
+                ;;
+            SOA)
+                # BIND 9 SOA format: primary responsible serial refresh retry expire minimum
+                # responsible person uses . instead of @ e.g. hostmaster.example.com. = hostmaster@example.com
+                local SOA_PRIMARY SOA_RESP SOA_SERIAL SOA_REFRESH SOA_RETRY SOA_EXPIRE SOA_MIN
+                read -r SOA_PRIMARY SOA_RESP SOA_SERIAL SOA_REFRESH SOA_RETRY SOA_EXPIRE SOA_MIN <<< "${VALUE}"
+                SOA_PRIMARY=$(get_fqdn "${SOA_PRIMARY}" "${CURRENT_ORIGIN}")
+                # Resolve relative responsible person, then convert BIND 9 dot notation to email @
+                SOA_RESP=$(get_fqdn "${SOA_RESP}" "${CURRENT_ORIGIN}")
+                SOA_RESP=$(echo "${SOA_RESP}" | sed 's/\./\@/')
+                local USE_DATE_SCHEME="false"
+                if [[ "${SOA_SERIAL,,}" == "auto" ]]; then
+                    SOA_SERIAL="0"
+                    USE_DATE_SCHEME="true"
+                fi
+                SOA_REFRESH=$(ttl_to_seconds "${SOA_REFRESH}")
+                SOA_RETRY=$(ttl_to_seconds "${SOA_RETRY}")
+                SOA_EXPIRE=$(ttl_to_seconds "${SOA_EXPIRE}")
+                SOA_MIN=$(ttl_to_seconds "${SOA_MIN}")
+                local SOA_RESPONSE SOA_STATUS
+                if "${DRY_RUN}"; then
+                    echo "    SOA ${DOMAIN} ttl=${TTL}"
+                    echo "        primaryNameServer: ${SOA_PRIMARY}"
+                    echo "        responsiblePerson: ${SOA_RESP}"
+                    echo "        serial: ${SOA_SERIAL} useSerialDateScheme: ${USE_DATE_SCHEME}"
+                    echo "        refresh: ${SOA_REFRESH} retry: ${SOA_RETRY} expire: ${SOA_EXPIRE} minimum: ${SOA_MIN}"
+                else
+                SOA_RESPONSE=$(curl -s -G --max-time 30 "${TECH_API_BASE}/zones/records/update" \
+                    --data-urlencode "token=${TECH_TOKEN}" \
+                    --data-urlencode "domain=${DOMAIN}" \
+                    --data-urlencode "type=SOA" \
+                    --data-urlencode "primaryNameServer=${SOA_PRIMARY}" \
+                    --data-urlencode "responsiblePerson=${SOA_RESP}" \
+                    --data-urlencode "serial=${SOA_SERIAL}" \
+                    --data-urlencode "refresh=${SOA_REFRESH}" \
+                    --data-urlencode "retry=${SOA_RETRY}" \
+                    --data-urlencode "expire=${SOA_EXPIRE}" \
+                    --data-urlencode "minimum=${SOA_MIN}" \
+                    --data-urlencode "useSerialDateScheme=${USE_DATE_SCHEME}")
+                SOA_STATUS=$(echo "${SOA_RESPONSE}" | jq -r '.status')
+                if [ "${SOA_STATUS}" != "ok" ]; then
+                    log_err "$(echo "${SOA_RESPONSE}" | jq -r '.errorMessage') [SOA ${DOMAIN}]"
+                else
+                    log "SOA ${DOMAIN}"
+                fi
+                fi
+                ;;
+            *)
+                log "WARNING: Unknown record type ${TYPE} for ${DOMAIN}, skipping"
+                ;;
+        esac
+
+    done < <(preprocess_zone "${RECORDS_FILE}")
+}
+
+# ============================================================
+# MAIN
+# ============================================================
+
+# Check dependencies
+for CMD in grepcidr jq envsubst curl ip perl; do
+    if ! command -v "${CMD}" > /dev/null 2>&1; then
+        log_err "Required command not found: ${CMD}"
+        exit 1
+    fi
+done
+
+# Load config file
+CONF_FILE="${DDNS_DIR}/technitium-ddns.conf"
+
+if [ ! -f "${CONF_FILE}" ]; then
+    log_err "Config file not found: ${CONF_FILE}"
+    exit 1
+fi
+
+CONF_OWNER=$(stat -c '%U' "${CONF_FILE}")
+CONF_PERMS=$(stat -c '%a' "${CONF_FILE}")
+if [ "${CONF_OWNER}" != "root" ] || [ "${CONF_PERMS}" != "640" ]; then
+    log_err "${CONF_FILE} must be owned by root with permissions 640"
+    exit 1
+fi
+
+# shellcheck source=/etc/technitium-ddns/technitium-ddns.conf
+source "${CONF_FILE}"
+
+# Validate required config vars — TECH_TOKEN not required for dry run
+# WAN_IFACE and LAN_IFACE are only validated later if a zone actually needs them
+
+shopt -s nullglob
+# Parse arguments — --dry-run, --run-tests, and optional zone name (order independent)
+ZONE_ARG=""
+RUN_TESTS=false
+for ARG in "$@"; do
+    case "${ARG}" in
+        --dry-run)   DRY_RUN=true ;;
+        --run-tests) RUN_TESTS=true ;;
+        *)           ZONE_ARG="${ARG}" ;;
+    esac
+done
+
+# Pick zones/ or tests/ subdirectory based on --run-tests flag
+if "${RUN_TESTS}"; then
+    ZONE_ROOTS="${DDNS_DIR}/tests"
+    if [ ! -d "${ZONE_ROOTS}" ]; then
+        log_err "Tests directory not found: ${ZONE_ROOTS}"
+        exit 1
+    fi
+else
+    ZONE_ROOTS="${DDNS_DIR}/zones"
+    if [ ! -d "${ZONE_ROOTS}" ]; then
+        log_err "Zones directory not found: ${ZONE_ROOTS}"
+        exit 1
+    fi
+fi
+
+if [ -n "${ZONE_ARG}" ]; then
+    if [ "${ZONE_ARG}" = "example.com" ]; then
+        DRY_RUN=true
+    fi
+    ZONE_DIRS=("${ZONE_ROOTS}/${ZONE_ARG}/")
+    if [ ! -d "${ZONE_DIRS[0]}" ]; then
+        log_err "Zone directory not found: ${ZONE_DIRS[0]}"
+        exit 1
+    fi
+else
+    ZONE_DIRS=("${ZONE_ROOTS}"/*/)
+    if ! "${RUN_TESTS}"; then
+        REAL_ZONES=()
+        for Z in "${ZONE_DIRS[@]}"; do
+            [[ "$(basename "${Z}")" != "example.com" ]] && REAL_ZONES+=("${Z}")
+        done
+        if [ "${#REAL_ZONES[@]}" -eq 0 ]; then
+            log "No zones configured — running example.com as demo"
+            DRY_RUN=true
+            ZONE_DIRS=("${ZONE_ROOTS}/example.com/")
+        else
+            ZONE_DIRS=("${REAL_ZONES[@]}")
+        fi
+    fi
+fi
+
+# TECH_TOKEN required for real runs — checked after zone discovery so the
+# no-zones demo path can set DRY_RUN=true before we get here
+if ! "${DRY_RUN}" && [ -z "${TECH_TOKEN}" ]; then
+    log_err "TECH_TOKEN not set in ${CONF_FILE}"
+    exit 1
+fi
+
+# Check which placeholders are needed
+NEEDS_WAN=false
+NEEDS_LAN=false
+for ZONE_DIR in "${ZONE_DIRS[@]}"; do
+    RECORDS_FILE="${ZONE_DIR}main.zone"
+    [ ! -f "${RECORDS_FILE}" ] && continue
+    grep -q '\${WAN}' "${RECORDS_FILE}" && NEEDS_WAN=true
+    grep -q '\${LAN}' "${RECORDS_FILE}" && NEEDS_LAN=true
+    grep -q 'SplitHorizon.SimpleAddress' "${RECORDS_FILE}" && NEEDS_WAN=true && NEEDS_LAN=true
+done
+
+# Resolve and validate WAN
+if "${NEEDS_WAN}"; then
+    if [ -z "${WAN}" ]; then
+        if [ -z "${WAN_IFACE}" ]; then
+            if "${DRY_RUN}"; then
+                log "WARNING: WAN_IFACE not set in ${CONF_FILE} — using demo IPs WAN=1.2.3.4 LAN=10.0.0.1"
+                WAN="1.2.3.4"
+            else
+                log_err "WAN_IFACE not set in ${CONF_FILE} (or override with: sudo WAN=1.2.3.4 technitium-ddns)"
+                exit 1
+            fi
+        else
+            WAN=$(ip -4 addr show "${WAN_IFACE}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
+        fi
+    fi
+    if [ -z "${WAN}" ]; then
+        log_err "Could not determine WAN IP from ${WAN_IFACE}"
+        exit 1
+    fi
+    if ! echo "${WAN}" | grepcidr "0.0.0.0/0" > /dev/null 2>&1; then
+        log_err "WAN IP ${WAN} is not a valid IP address"
+        exit 1
+    fi
+    if echo "${WAN}" | grepcidr "${BOGON_RANGES}" > /dev/null 2>&1; then
+        log_err "WAN IP ${WAN} is a bogon address"
+        exit 1
+    fi
+fi
+
+# Resolve and validate LAN
+if "${NEEDS_LAN}"; then
+    if [ -z "${LAN}" ]; then
+        if [ -z "${LAN_IFACE}" ]; then
+            if "${DRY_RUN}"; then
+                LAN="10.0.0.1"
+            else
+                log_err "LAN_IFACE not set in ${CONF_FILE} (or override with: sudo LAN=192.168.1.1 technitium-ddns)"
+                exit 1
+            fi
+        else
+            LAN=$(ip -4 addr show "${LAN_IFACE}" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n 1)
+        fi
+    fi
+    if [ -z "${LAN}" ]; then
+        log_err "Could not determine LAN IP from ${LAN_IFACE}"
+        exit 1
+    fi
+    if ! echo "${LAN}" | grepcidr "0.0.0.0/0" > /dev/null 2>&1; then
+        log_err "LAN IP ${LAN} is not a valid IP address"
+        exit 1
+    fi
+    if ! echo "${LAN}" | grepcidr "${BOGON_RANGES}" > /dev/null 2>&1; then
+        log_err "LAN IP ${LAN} is not a bogon address"
+        exit 1
+    fi
+fi
+
+log "WAN: ${WAN:-n/a} LAN: ${LAN:-n/a}"
+
+# Update FreeDNS records if keys are configured
+if [ -n "${FREEDNS_KEYS}" ] && ! "${DRY_RUN}"; then
+    IFS="," read -ra KEYS <<< "${FREEDNS_KEYS}"
+    for KEY in "${KEYS[@]}"; do
+        RESULT=$(curl -s --max-time 30 "https://sync.afraid.org/u/${KEY}/" 2>&1)
+        log "${RESULT}"
+    done
+fi
+
+export WAN LAN
+
+# Process each zone
+for ZONE_DIR in "${ZONE_DIRS[@]}"; do
+    ZONE=$(basename "${ZONE_DIR}")
+    ZONE="${ZONE%.}"
+    ZONE="${ZONE,,}"
+    RECORDS_FILE="${ZONE_DIR}main.zone"
+
+    if [ ! -f "${RECORDS_FILE}" ]; then
+        log "WARNING: No main.zone in ${ZONE_DIR}, skipping"
+        continue
+    fi
+
+    OWNER=$(stat -c '%U' "${RECORDS_FILE}")
+    PERMS=$(stat -c '%a' "${RECORDS_FILE}")
+
+    if [ "${OWNER}" != "root" ] || [ "${PERMS}" != "640" ]; then
+        log_err "${RECORDS_FILE} must be owned by root with permissions 640, skipping"
+        continue
+    fi
+
+    if "${RUN_TESTS}" && [[ "${ZONE}" != *.test ]]; then
+        log_err "Test zone ${ZONE} does not use .test TLD (RFC 6761), skipping"
+        continue
+    fi
+
+    tech_ensure_zone "${ZONE}" || continue
+    process_zone "${ZONE}" "${RECORDS_FILE}"
+done
+
+log "Done"

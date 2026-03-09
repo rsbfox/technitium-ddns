@@ -1,0 +1,71 @@
+#!/bin/bash
+# /etc/networkd-dispatcher/routable.d/wan-routable
+#
+# Companion script for technitium-ddns.
+# Fires when a network interface reaches routable state via systemd-networkd.
+# Validates the WAN IP is public, cycles the interface if a bogon IP is
+# assigned (e.g. during cable modem sync), then calls technitium-ddns
+# only if the IP has changed since the last successful update.
+#
+# INSTALL:
+#   sudo cp wan-routable /etc/networkd-dispatcher/routable.d/wan-routable
+#   sudo chown root:root /etc/networkd-dispatcher/routable.d/wan-routable
+#   sudo chmod 755 /etc/networkd-dispatcher/routable.d/wan-routable
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+# WAN interface to monitor
+WAN_IFACE="bond0"
+# Seconds to wait before bringing interface back up after cycling
+IFACE_CYCLE_WAIT=15
+# ============================================================
+BOGON_RANGES="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16"
+LAST_IP_FILE="/var/lib/wan-routable.last-ip"
+
+log() {
+    if [ -t 1 ]; then
+        echo "$1"
+    else
+        logger -t wan-routable "$1"
+    fi
+}
+
+log_err() {
+    if [ -t 1 ]; then
+        echo "ERROR: $1" >&2
+    else
+        logger -t wan-routable "ERROR: $1"
+    fi
+}
+
+if [ "$IFACE" = "${WAN_IFACE}" ]; then
+
+    LOCKFILE="/var/run/wan-routable.lock"
+    exec 9>"${LOCKFILE}"
+    if ! flock -w 60 9; then
+        log_err "Could not acquire lock after 60s, exiting"
+        exit 1
+    fi
+
+    PUBLIC=$(echo "${ADDR}" | grepcidr -v "${BOGON_RANGES}" 2>/dev/null)
+
+    if [[ -z "${ADDR}" || -z "${PUBLIC}" ]]; then
+        log "${WAN_IFACE}: Bogon or no IP (${ADDR:-none}), cycling interface..."
+        ip link set "${WAN_IFACE}" down
+        sleep "${IFACE_CYCLE_WAIT}"
+        ip link set "${WAN_IFACE}" up
+        exit 0
+    fi
+
+    log "${WAN_IFACE}: Public IP confirmed: ${ADDR}"
+
+    # Only update if IP has changed since last run
+    LAST_IP=$(cat "${LAST_IP_FILE}" 2>/dev/null)
+    if [ "${ADDR}" = "${LAST_IP}" ]; then
+        log "${WAN_IFACE}: IP unchanged (${ADDR}), skipping update"
+        exit 0
+    fi
+
+    WAN="${ADDR}" /usr/local/bin/technitium-ddns && echo "${ADDR}" > "${LAST_IP_FILE}"
+fi
