@@ -11,6 +11,7 @@
 #   sudo cp wan-routable /etc/networkd-dispatcher/routable.d/wan-routable
 #   sudo chown root:root /etc/networkd-dispatcher/routable.d/wan-routable
 #   sudo chmod 755 /etc/networkd-dispatcher/routable.d/wan-routable
+#   sudo systemctl enable --now networkd-dispatcher
 
 # ============================================================
 # CONFIGURATION
@@ -40,6 +41,11 @@ log_err() {
 }
 
 if [ "$IFACE" = "${WAN_IFACE}" ]; then
+
+    # Ignore IPv6 events — only handle IPv4
+    if [[ "${ADDR}" == *:* ]]; then
+        exit 0
+    fi
 
     LOCKFILE="/var/run/wan-routable.lock"
     exec 9>"${LOCKFILE}"

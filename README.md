@@ -173,11 +173,16 @@ records need neither.
 
 ## Status
 
-Tested on Ubuntu 24.04 VM with Technitium DNS Server. Use at your own risk.
+Tested on Ubuntu 24.04 with Technitium DNS Server. Use at your own risk.
 
-#UNTESTED **wan-routable** — a networkd-dispatcher script that triggers `technitium-ddns`
-automatically when the WAN interface obtains a new routable IP. Requires
-`systemd-networkd` and `networkd-dispatcher`.
+## wan-routable
+
+A networkd-dispatcher script that triggers `technitium-ddns` automatically
+when the WAN interface obtains a new routable IP. Validates the IP is public,
+cycles the interface if a bogon is assigned (e.g. during cable modem sync),
+and skips the update if the IP hasn't changed.
+
+Requires `systemd-networkd` as the network renderer (set `renderer: networkd` in Netplan).
 
 Install:
 
@@ -185,6 +190,7 @@ Install:
 sudo cp wan-routable /etc/networkd-dispatcher/routable.d/wan-routable
 sudo chown root:root /etc/networkd-dispatcher/routable.d/wan-routable
 sudo chmod 755 /etc/networkd-dispatcher/routable.d/wan-routable
+sudo systemctl enable --now networkd-dispatcher
 ```
 
 Edit `WAN_IFACE` at the top of `wan-routable` to match your interface name.
